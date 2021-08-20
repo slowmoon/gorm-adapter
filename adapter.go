@@ -18,17 +18,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"strconv"
 	"strings"
-
 	"github.com/casbin/casbin/v2/model"
 	"github.com/casbin/casbin/v2/persist"
-	"gorm.io/driver/mysql"
-	"gorm.io/driver/postgres"
-
-	//"gorm.io/driver/sqlite"
-	"gorm.io/driver/sqlserver"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 	"gorm.io/plugin/dbresolver"
@@ -119,66 +112,6 @@ func (dbPool *DbPool) switchDb(dbName string) *gorm.DB {
 // It's up to whether you have specified an existing DB in dataSourceName.
 // If dbSpecified == true, you need to make sure the DB in dataSourceName exists.
 // If dbSpecified == false, the adapter will automatically create a DB named databaseName.
-func NewAdapter(driverName string, dataSourceName string, params ...interface{}) (*Adapter, error) {
-	a := &Adapter{}
-	a.driverName = driverName
-	a.dataSourceName = dataSourceName
-
-	a.tableName = defaultTableName
-	a.databaseName = defaultDatabaseName
-	a.dbSpecified = false
-
-	if len(params) == 1 {
-		switch p1 := params[0].(type) {
-		case bool:
-			a.dbSpecified = p1
-		case string:
-			a.databaseName = p1
-		default:
-			return nil, errors.New("wrong format")
-		}
-	} else if len(params) == 2 {
-		switch p2 := params[1].(type) {
-		case bool:
-			a.dbSpecified = p2
-			p1, ok := params[0].(string)
-			if !ok {
-				return nil, errors.New("wrong format")
-			}
-			a.databaseName = p1
-		case string:
-			p1, ok := params[0].(string)
-			if !ok {
-				return nil, errors.New("wrong format")
-			}
-			a.databaseName = p1
-			a.tableName = p2
-		default:
-			return nil, errors.New("wrong format")
-		}
-	} else if len(params) == 3 {
-		if p3, ok := params[2].(bool); ok {
-			a.dbSpecified = p3
-			a.databaseName = params[0].(string)
-			a.tableName = params[1].(string)
-		} else {
-			return nil, errors.New("wrong format")
-		}
-	} else if len(params) != 0 {
-		return nil, errors.New("too many parameters")
-	}
-
-	// Open the DB, create it if not existed.
-	err := a.open()
-	if err != nil {
-		return nil, err
-	}
-
-	// Call the destructor when the object is released.
-	runtime.SetFinalizer(a, finalizer)
-
-	return a, nil
-}
 
 // NewAdapterByDBUseTableName creates gorm-adapter by an existing Gorm instance and the specified table prefix and table name
 // Example: gormadapter.NewAdapterByDBUseTableName(&db, "cms", "casbin") Automatically generate table name like this "cms_casbin"
@@ -233,14 +166,6 @@ func NewAdapterByMulDb(dbPool DbPool, dbName string, prefix string, tableName st
 
 // NewFilteredAdapter is the constructor for FilteredAdapter.
 // Casbin will not automatically call LoadPolicy() for a filtered adapter.
-func NewFilteredAdapter(driverName string, dataSourceName string, params ...interface{}) (*Adapter, error) {
-	adapter, err := NewAdapter(driverName, dataSourceName, params...)
-	if err != nil {
-		return nil, err
-	}
-	adapter.isFiltered = true
-	return adapter, err
-}
 
 // NewAdapterByDB creates gorm-adapter by an existing Gorm instance
 func NewAdapterByDB(db *gorm.DB) (*Adapter, error) {
@@ -261,77 +186,6 @@ func NewAdapterByDBWithCustomTable(db *gorm.DB, t interface{}, tableName ...stri
 	}
 
 	return NewAdapterByDBUseTableName(db.WithContext(ctx), "", curTableName)
-}
-
-func openDBConnection(driverName, dataSourceName string) (*gorm.DB, error) {
-	var err error
-	var db *gorm.DB
-	if driverName == "postgres" {
-		db, err = gorm.Open(postgres.Open(dataSourceName), &gorm.Config{})
-	} else if driverName == "mysql" {
-		db, err = gorm.Open(mysql.Open(dataSourceName), &gorm.Config{})
-	} else if driverName == "sqlserver" {
-		db, err = gorm.Open(sqlserver.Open(dataSourceName), &gorm.Config{})
-		//} else if driverName == "sqlite3" {
-		//	db, err = gorm.Open(sqlite.Open(dataSourceName), &gorm.Config{})
-	} else {
-		return nil, errors.New("Database dialect '" + driverName + "' is not supported. Supported databases are postgres, mysql and sqlserver")
-	}
-	if err != nil {
-		return nil, err
-	}
-	return db, err
-}
-
-func (a *Adapter) createDatabase() error {
-	var err error
-	db, err := openDBConnection(a.driverName, a.dataSourceName)
-	if err != nil {
-		return err
-	}
-	if a.driverName == "postgres" {
-		if err = db.Exec("CREATE DATABASE " + a.databaseName).Error; err != nil {
-			// 42P04 is	duplicate_database
-			if strings.Contains(fmt.Sprintf("%s", err), "42P04") {
-				return nil
-			}
-		}
-	} else if a.driverName != "sqlite3" {
-		err = db.Exec("CREATE DATABASE IF NOT EXISTS " + a.databaseName).Error
-	}
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (a *Adapter) open() error {
-	var err error
-	var db *gorm.DB
-
-	if a.dbSpecified {
-		db, err = openDBConnection(a.driverName, a.dataSourceName)
-		if err != nil {
-			return err
-		}
-	} else {
-		if err = a.createDatabase(); err != nil {
-			return err
-		}
-		if a.driverName == "postgres" {
-			db, err = openDBConnection(a.driverName, a.dataSourceName+" dbname="+a.databaseName)
-		} else if a.driverName == "sqlite3" {
-			db, err = openDBConnection(a.driverName, a.dataSourceName)
-		} else {
-			db, err = openDBConnection(a.driverName, a.dataSourceName+a.databaseName)
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	a.db = db.Scopes(a.casbinRuleTable()).Session(&gorm.Session{})
-	return a.createTable()
 }
 
 // AddLogger adds logger to db
